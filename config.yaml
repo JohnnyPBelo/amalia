@@ -1,0 +1,58 @@
+# Amalia configuration — A9 Mega (Strix Halo).
+#
+# Orchestrator = local Qwen2.5-7B-Instruct (the Conductor's exact base model),
+# served by llama.cpp Vulkan on :8901.
+#
+# Worker pool = frontier models via the copilot bridge. Workers are presented to
+# the orchestrator ONLY as ordinals (Model 0/1/2) + a capability hint.
+#
+# gpt-5.5 is wired through the Responses-API shim on :4142 (api_type: responses) —
+# gpt-5.x models reject /chat/completions on the bridge.
+
+server:
+  host: 0.0.0.0
+  port: 8900
+
+orchestrator:
+  name: qwen2.5-7b-conductor
+  model: qwen2.5-7b-instruct
+  base_url: http://localhost:8901/v1
+  api_key: none
+  temperature: 1.0          # paper decodes the Conductor at temp 1.0
+  max_tokens: 1024
+
+pool:
+  - name: gpt-5.5                       # Model 0 — frontier, Responses API (:4142)
+    model: gpt-5.5
+    base_url: http://localhost:4142/v1
+    api_key: none
+    api_type: responses
+    reasoning_effort: medium           # none/low/medium/high/xhigh
+    capabilities: "agentic coding, deep reasoning, general problem solving"
+    max_tokens: 4096
+
+  - name: gemini-3.1-pro                # Model 1 — math/science/factual, chat API
+    model: gemini-3.1-pro-preview
+    base_url: http://localhost:4141/v1
+    api_key: none
+    api_type: chat
+    capabilities: "math, science, factual recall, fast reasoning"
+    temperature: 0.2
+    max_tokens: 4096
+
+  - name: claude-opus-4.8             # Model 2 — verification/debugging/synthesis, chat API
+    model: claude-opus-4.8
+    base_url: http://localhost:4141/v1
+    api_key: none
+    api_type: chat
+    capabilities: "deep reasoning, debugging, verification, long-form synthesis"
+    temperature: 0.2
+    max_tokens: 4096
+
+conductor:
+  max_steps: 5
+  max_recursion: 1          # 1 refine/verify round; raise for more test-time compute
+  parse_retries: 2
+  orchestrator_temperature: 1.0
+  orchestrator_max_tokens: 1024
+  fallback_worker: 0

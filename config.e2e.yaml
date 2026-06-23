@@ -1,0 +1,48 @@
+# E2E test config — worker pool = the REAL Fugu-Ultra pool via the :4141 bridge.
+# Orchestrator stays local (Qwen2.5-7B), workers are the frontier models the
+# paper actually uses: GPT-5.5, Claude Opus 4.8, Gemini 3.1 Pro.
+
+server:
+  host: 0.0.0.0
+  port: 8900
+
+orchestrator:
+  name: qwen2.5-7b-conductor
+  model: qwen2.5-7b-instruct
+  base_url: http://localhost:8901/v1
+  api_key: none
+  temperature: 1.0
+  max_tokens: 1024
+
+pool:
+  - name: gpt-4o                      # Model 0  (gpt-5.x needs Responses API; bridge only does chat/completions)
+    model: gpt-4o-2024-11-20
+    base_url: http://localhost:4141/v1
+    api_key: none
+    capabilities: "agentic coding, general reasoning, tool use"
+    temperature: 0.2
+    max_tokens: 2048
+
+  - name: gemini-3.1-pro              # Model 1
+    model: gemini-3.1-pro-preview
+    base_url: http://localhost:4141/v1
+    api_key: none
+    capabilities: "math, science, factual recall, fast reasoning"
+    temperature: 0.2
+    max_tokens: 2048
+
+  - name: claude-opus-4.8            # Model 2
+    model: claude-opus-4.8
+    base_url: http://localhost:4141/v1
+    api_key: none
+    capabilities: "deep reasoning, debugging, verification, long-form synthesis"
+    temperature: 0.2
+    max_tokens: 2048
+
+conductor:
+  max_steps: 5
+  max_recursion: 1
+  parse_retries: 2
+  orchestrator_temperature: 1.0
+  orchestrator_max_tokens: 1024
+  fallback_worker: 0
