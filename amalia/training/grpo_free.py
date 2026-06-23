@@ -36,6 +36,33 @@ EXPERIENCE_HEADER = (
     "distilled from what worked on similar tasks):\n"
 )
 
+_VAGUE_WORDS = ("properly", "effectively", "thoroughly", "appropriate", "necessary",
+                "correctly", "accurately", "comprehensive")
+# Strong structural mechanisms — a useful experience must name at least one of these.
+# NOTE: the bare token "access_list" is deliberately NOT here: the entire problem
+# domain is about access_lists, so "use access_lists effectively" is a platitude.
+# A *concrete* access_list is named by actual brackets ("[0,1]", "[]"), which the
+# "[" key below captures. We require the structure to be named, not just referenced.
+_MECHANISM_KEYS = ("step", "chain", "tree", "best-of", "best of", "aggregat",
+                   "[", "leaf", "leaves", "single", "parallel")
+
+
+def is_useful_experience(line: str) -> bool:
+    """A distilled experience is kept only if it names a concrete STRUCTURAL mechanism
+    (a topology, a step count, a literal access_list like [0,1]) and isn't padded with
+    vague filler. Mirrors the failure mode we observed where the 7B orchestrator emitted
+    platitudes like 'ensure subtasks are verified properly' or 'use access_lists
+    effectively' — note that neither 'verify' nor a bare 'access_list' mention is a
+    structural mechanism (every workflow can claim both)."""
+    if not line:
+        return False
+    if line.upper().startswith("NONE"):
+        return False
+    lower = line.lower()
+    has_mechanism = any(k in lower for k in _MECHANISM_KEYS)
+    vague_count = sum(lower.count(v) for v in _VAGUE_WORDS)
+    return has_mechanism and vague_count < 2
+
 
 @dataclass
 class Rollout:
@@ -116,10 +143,13 @@ class TrainingFreeGRPO:
             f"Task domain: {task.domain}\nQuestion: {task.question}\n\n"
             f"WORKFLOWS THAT SUCCEEDED:\n{fmt(wins)}\n\n"
             f"WORKFLOWS THAT FAILED:\n{fmt(losses)}\n\n"
-            "In ONE imperative sentence (max 25 words), state a GENERAL, transferable "
-            "orchestration rule that explains why the successes worked — about routing, "
-            "decomposition, verification, or access_list usage. Do not mention this "
-            "specific question. Start with a verb."
+            "Compare the SUCCESSFUL vs FAILED workflows above. State the ONE concrete "
+            "structural difference that made the successes win. Your rule MUST reference "
+            "a specific mechanism: a number of steps, a topology (single/chain/tree/"
+            "best-of-N), or a concrete access_list choice (e.g. 'aggregator reads [0,1]', "
+            "'leaves use []'). Avoid vague words like 'properly', 'effectively', "
+            "'thoroughly', 'appropriate'. Max 22 words, start with a verb. If there is no "
+            "clear structural difference, reply exactly: NONE."
         )
         w = self.orchestrator
         headers = {"Content-Type": "application/json"}
@@ -133,7 +163,7 @@ class TrainingFreeGRPO:
             r.raise_for_status()
             text = (r.json()["choices"][0]["message"]["content"] or "").strip()
             line = text.splitlines()[0].strip(" -*").strip() if text else ""
-            return line or None
+            return line if is_useful_experience(line) else None
         except Exception:  # noqa: BLE001
             return None
 
