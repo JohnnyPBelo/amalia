@@ -1,0 +1,161 @@
+"""
+Training-Free GRPO for the Amalia Conductor.
+
+Idea (Training-Free GRPO, arXiv:2510.19807-style): instead of gradient updates,
+optimize in *context space*. Each iteration:
+
+  1. For each task, sample G workflows (rollouts) from the Conductor at temp 1.0.
+  2. Execute each, score with the verifiable reward (format + correctness).
+  3. Within the group, contrast successes vs failures and ask the orchestrator LLM
+     to extract a short, general "experience" (a semantic group-advantage) — what
+     routing/decomposition choice made the winners win.
+  4. Append distilled experiences to an experience library.
+  5. The library is injected into the Conductor prompt on subsequent iterations.
+
+No weights are touched. The artifact is `experiences.json` — a learned prior over
+*how to orchestrate*, portable across orchestrator models.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+import httpx
+
+from ..conductor import Conductor, ConductorConfig
+from ..workers import Worker, WorkerPool
+from ..config import load_config
+from .tasks import Task, get_tasks, extract_final
+
+
+EXPERIENCE_HEADER = (
+    "\nLEARNED ORCHESTRATION EXPERIENCES (apply these when they fit; they were "
+    "distilled from what worked on similar tasks):\n"
+)
+
+
+@dataclass
+class Rollout:
+    workflow_repr: str
+    final_answer: str
+    reward: float
+    n_calls: int
+
+
+@dataclass
+class TrainState:
+    experiences: List[str] = field(default_factory=list)
+    history: List[dict] = field(default_factory=list)  # per-iteration metrics
+
+    def experience_block(self, max_items: int = 12) -> str:
+        if not self.experiences:
+            return ""
+        items = self.experiences[-max_items:]
+        return EXPERIENCE_HEADER + "\n".join(f"- {e}" for e in items) + "\n"
+
+    def save(self, path: str):
+        with open(path, "w") as f:
+            json.dump({"experiences": self.experiences, "history": self.history}, f, indent=2)
+
+    @classmethod
+    def load(cls, path: str) -> "TrainState":
+        if not os.path.exists(path):
+            return cls()
+        with open(path) as f:
+            d = json.load(f)
+        return cls(experiences=d.get("experiences", []), history=d.get("history", []))
+
+
+class TrainingFreeGRPO:
+    def __init__(self, orchestrator: Worker, pool: WorkerPool,
+                 base_cfg: ConductorConfig, state: Optional[TrainState] = None):
+        self.orchestrator = orchestrator
+        self.pool = pool
+        self.base_cfg = base_cfg
+        self.state = state or TrainState()
+
+    def _conductor(self, few_shot_extra: str) -> Conductor:
+        """A Conductor whose few-shot block is augmented with learned experiences."""
+        from ..prompts import DEFAULT_FEWSHOT
+        cfg = ConductorConfig(
+            max_steps=self.base_cfg.max_steps,
+            max_recursion=0,                 # rollouts are single-shot for clean credit
+            parse_retries=self.base_cfg.parse_retries,
+            orchestrator_temperature=1.0,    # exploration during training
+            orchestrator_max_tokens=self.base_cfg.orchestrator_max_tokens,
+            fallback_worker=self.base_cfg.fallback_worker,
+            few_shot=DEFAULT_FEWSHOT + few_shot_extra,
+        )
+        return Conductor(self.orchestrator, self.pool, cfg)
+
+    async def _rollout(self, task: Task, conductor: Conductor) -> Rollout:
+        trace = await conductor.run(task.prompt())
+        wf = trace.workflows[0] if trace.workflows else None
+        wf_repr = (f"model_id={wf.model_id} access_list={wf.access_list}" if wf else "<none>")
+        reward = 1.0 if task.check(trace.final_answer) else 0.0
+        return Rollout(workflow_repr=wf_repr, final_answer=extract_final(trace.final_answer),
+                       reward=reward, n_calls=trace.total_worker_calls)
+
+    async def _distill(self, task: Task, rollouts: List[Rollout],
+                       client: httpx.AsyncClient) -> Optional[str]:
+        """Ask the orchestrator LLM to extract one general experience from the group."""
+        wins = [r for r in rollouts if r.reward > 0]
+        losses = [r for r in rollouts if r.reward <= 0]
+        if not wins or not losses:
+            return None  # no contrast -> no signal (mirrors GRPO zero-advantage group)
+
+        def fmt(rs):
+            return "\n".join(f"  * {r.workflow_repr} -> FINAL={r.final_answer!r}" for r in rs[:4])
+
+        prompt = (
+            "You are improving an LLM ORCHESTRATOR that routes a question across worker "
+            "models by emitting model_id/subtasks/access_list workflows.\n\n"
+            f"Task domain: {task.domain}\nQuestion: {task.question}\n\n"
+            f"WORKFLOWS THAT SUCCEEDED:\n{fmt(wins)}\n\n"
+            f"WORKFLOWS THAT FAILED:\n{fmt(losses)}\n\n"
+            "In ONE imperative sentence (max 25 words), state a GENERAL, transferable "
+            "orchestration rule that explains why the successes worked — about routing, "
+            "decomposition, verification, or access_list usage. Do not mention this "
+            "specific question. Start with a verb."
+        )
+        w = self.orchestrator
+        headers = {"Content-Type": "application/json"}
+        if w.api_key and w.api_key != "none":
+            headers["Authorization"] = f"Bearer {w.api_key}"
+        try:
+            r = await client.post(f"{w.base_url.rstrip('/')}/chat/completions",
+                                  json={"model": w.model, "temperature": 0.7, "max_tokens": 80,
+                                        "messages": [{"role": "user", "content": prompt}]},
+                                  headers=headers, timeout=w.timeout)
+            r.raise_for_status()
+            text = (r.json()["choices"][0]["message"]["content"] or "").strip()
+            line = text.splitlines()[0].strip(" -*").strip() if text else ""
+            return line or None
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def iteration(self, tasks: List[Task], group_size: int = 4) -> dict:
+        conductor = self._conductor(self.state.experience_block())
+        total_reward, n = 0.0, 0
+        new_exps: List[str] = []
+
+        async with httpx.AsyncClient() as client:
+            for task in tasks:
+                rollouts = await asyncio.gather(*[self._rollout(task, conductor)
+                                                  for _ in range(group_size)])
+                grp_reward = sum(r.reward for r in rollouts) / len(rollouts)
+                total_reward += grp_reward
+                n += 1
+                exp = await self._distill(task, list(rollouts), client)
+                if exp and exp not in self.state.experiences and exp not in new_exps:
+                    new_exps.append(exp)
+
+        self.state.experiences.extend(new_exps)
+        metrics = {"mean_group_reward": round(total_reward / max(n, 1), 4),
+                   "n_tasks": n, "new_experiences": len(new_exps),
+                   "total_experiences": len(self.state.experiences)}
+        self.state.history.append(metrics)
+        return metrics

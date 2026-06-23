@@ -1,0 +1,58 @@
+# Training config — cheap LOCAL pool so Training-Free GRPO iterations don't burn
+# the frontier bridge. Orchestrator AND workers are local llama.cpp servers.
+#
+# For a richer signal you can point the pool at the frontier bridge (see config.yaml),
+# but that is slow/expensive for G-rollout x N-iter loops. Start local, prove the
+# mechanism, then scale the pool.
+#
+# NOTE: workers 1 and 2 reuse the same local Qwen endpoint with different capability
+# hints — this still exercises routing/decomposition/verification learning, which is
+# what Training-Free GRPO optimizes (the orchestration policy, not worker identity).
+
+server:
+  host: 0.0.0.0
+  port: 8900
+
+orchestrator:
+  name: qwen2.5-7b-conductor
+  model: qwen2.5-7b-instruct
+  base_url: http://localhost:8901/v1
+  api_key: none
+  temperature: 1.0
+  max_tokens: 1024
+
+pool:
+  - name: local-qwen-generalist        # Model 0
+    model: qwen2.5-7b-instruct
+    base_url: http://localhost:8901/v1
+    api_key: none
+    api_type: chat
+    capabilities: "general problem solving, coding, step-by-step reasoning"
+    temperature: 0.2
+    max_tokens: 1024
+
+  - name: local-qwen-math              # Model 1
+    model: qwen2.5-7b-instruct
+    base_url: http://localhost:8901/v1
+    api_key: none
+    api_type: chat
+    capabilities: "arithmetic, math, number theory, precise calculation"
+    temperature: 0.1
+    max_tokens: 1024
+
+  - name: local-qwen-verifier          # Model 2
+    model: qwen2.5-7b-instruct
+    base_url: http://localhost:8901/v1
+    api_key: none
+    api_type: chat
+    capabilities: "verification, checking answers, catching errors"
+    temperature: 0.1
+    max_tokens: 1024
+
+conductor:
+  max_steps: 4
+  max_recursion: 0
+  parse_retries: 2
+  orchestrator_temperature: 1.0
+  orchestrator_max_tokens: 1024
+  fallback_worker: 0

@@ -28,10 +28,18 @@ and the Fugu technical report (arXiv:2606.21228) informed the design.
 
 ## Phase 2 — optional fine-tune (sharpen the orchestrator)
 Paper shows prompt+few-shot already induces orchestration; GRPO sharpens it.
-- [ ] Collect verifiable (question, checker) pairs from Hermes coding/math traffic.
-- [ ] Reward = format(parseable) + correctness(final matches), exactly as paper.
-- [ ] **Training-Free GRPO** first (experiential context, no gradients) — runs on the A9 without H100s.
-- [ ] If worthwhile: real GRPO via TRL on Qwen2.5-7B (paper: 2×H100, KL=0, 64 rollouts/q). On A9 use ROCm + LoRA to fit. See skill `fine-tuning-with-trl`.
+
+### 2a. Training-Free GRPO  🚧 IN PROGRESS
+Optimize in *context space*, no gradients, runs on the A9 with no H100s.
+- [x] Verifiable task set with reward = format + correctness (`amalia/training/tasks.py`, 12 tasks, FINAL: answer convention, LaTeX/markdown-tolerant checkers).
+- [x] Group-rollout loop: G workflows/task → score → contrast wins vs losses → orchestrator LLM distills ONE transferable "experience" (semantic group-advantage) → experience library injected into the Conductor prompt (`amalia/training/grpo_free.py`).
+- [x] Runner + eval harness (`amalia/training/run.py`): baseline → iterate → final pass-rate + delta; experiences persisted to `experiences.json`.
+- [x] Baseline measured (local all-Qwen pool): **0.667 (8/12)**.
+- [ ] Run iterations, confirm pass-rate delta, tune experience count/wording.
+- [ ] Frontier-pool training run (slower/$$, richer signal).
+
+### 2b. Real GRPO (optional, if 2a plateaus)
+- [ ] Real GRPO via TRL on Qwen2.5-7B. Paper: 2×H100, KL=0, 64 rollouts/q. On A9 use ROCm (torch 2.5.1+rocm6.2 confirmed) + LoRA to fit. See skill `fine-tuning-with-trl`.
 - [ ] Adaptive worker selection: train on random k-of-N pool subsets → generalize to swapped pools.
 - [ ] Recursion fine-tune: instantiate one recursion call for half the batch (paper Sec 3.2).
 
