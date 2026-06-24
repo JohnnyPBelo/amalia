@@ -20,6 +20,7 @@ class Task:
     question: str
     check: Callable[[str], bool]
     domain: str = "general"
+    tier: str = "seed"
 
     def prompt(self) -> str:
         return self.question + FINAL_INSTRUCTION
@@ -69,7 +70,37 @@ def str_eq(expected: str) -> Callable[[str], bool]:
     def chk(text: str) -> bool:
         fin = extract_final(text).strip().lower()
         whole = (text or "").strip().lower()
+        if exp in {"yes", "no"}:
+            # Avoid substring false positives like yes<-yesterday or no<-unknown.
+            pat = rf"\b{re.escape(exp)}\b"
+            return re.search(pat, fin) is not None or re.search(pat, whole) is not None
         return exp in fin or exp in whole
+    return chk
+
+
+def exact_str_eq(expected: str) -> Callable[[str], bool]:
+    """Case-insensitive exact final-answer match (after light wrapper stripping)."""
+    exp = expected.strip().lower()
+    def chk(text: str) -> bool:
+        return extract_final(text).strip().lower() == exp
+    return chk
+
+
+def comma_pair_eq(a: int, b: int) -> Callable[[str], bool]:
+    """Exact checker for index-pair tasks; avoids 1,2 matching 11,23."""
+    expected = [a, b]
+    def chk(text: str) -> bool:
+        nums = [int(x) for x in re.findall(r"-?\d+", extract_final(text))]
+        return nums == expected
+    return chk
+
+
+def exact_num_set(expected_items: List[int]) -> Callable[[str], bool]:
+    """Exact set checker for list tasks (e.g. primes); rejects extra wrong items."""
+    expected = sorted(int(x) for x in expected_items)
+    def chk(text: str) -> bool:
+        nums = sorted({int(x) for x in re.findall(r"-?\d+", extract_final(text))})
+        return nums == expected
     return chk
 
 

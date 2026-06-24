@@ -1,5 +1,5 @@
 """Tests for the training task checkers + final-answer extraction. No network."""
-from amalia.training.tasks import extract_final, SEED_TASKS, num_eq, str_eq, all_in
+from amalia.training.tasks import extract_final, SEED_TASKS, comma_pair_eq, exact_num_set, num_eq, str_eq, all_in
 
 
 def test_extract_final_basic():
@@ -36,6 +36,19 @@ def test_num_eq_ignores_commas_in_thousands():
 def test_str_eq_substring():
     assert str_eq("yes")("FINAL: Yes, balanced") is True
     assert str_eq("yes")("FINAL: no") is False
+
+
+def test_yes_no_str_eq_uses_word_boundaries():
+    assert str_eq("yes")("FINAL: yesterday") is False
+    assert str_eq("no")("FINAL: unknown") is False
+    assert str_eq("no")("FINAL: no") is True
+
+
+def test_exact_pair_and_set_checkers_reject_extras():
+    assert comma_pair_eq(1, 2)("FINAL: 1,2") is True
+    assert comma_pair_eq(1, 2)("FINAL: 11,23") is False
+    assert exact_num_set([83, 89, 97])("FINAL: 83, 89, 97") is True
+    assert exact_num_set([83, 89, 97])("FINAL: 83, 89, 91, 97") is False
 
 
 def test_all_in_requires_every_item():

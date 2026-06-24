@@ -34,17 +34,42 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # gfx1151 (Radeon 8060S) needs the gfx1100 kernel override before importing torch.
 os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
 
-import torch  # noqa: E402
-from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
-
 from amalia.config import load_config  # noqa: E402
 from amalia.engine import WorkflowEngine  # noqa: E402
 from amalia.parser import WorkflowParseError, parse_workflow  # noqa: E402
 from amalia.prompts import DEFAULT_FEWSHOT, build_conductor_prompt  # noqa: E402
+from amalia.training.curriculum import get_curriculum_tasks  # noqa: E402
 from amalia.training.tasks import get_tasks  # noqa: E402
 
 
+def select_tasks(task_source: str = "seed", ids_arg: str = "", limit: int = 0):
+    """Select eval tasks without loading the model (unit-testable)."""
+    ids = [x.strip() for x in ids_arg.split(",") if x.strip()] if ids_arg else None
+    if task_source == "seed":
+        tasks = get_tasks()
+    elif task_source == "curriculum":
+        tasks = get_curriculum_tasks("train")
+    elif task_source == "heldout":
+        tasks = get_curriculum_tasks("heldout")
+    elif task_source == "seed+heldout":
+        tasks = get_tasks() + get_curriculum_tasks("heldout")
+    else:
+        raise ValueError(f"unknown task source: {task_source!r}")
+    if ids:
+        by_id = {t.id: t for t in tasks}
+        missing = [i for i in ids if i not in by_id]
+        if missing:
+            raise ValueError(f"unknown task id(s) for {task_source}: {missing}")
+        tasks = [by_id[i] for i in ids]
+    if limit:
+        tasks = tasks[:limit]
+    return tasks
+
+
 def load_policy(model_name: str, adapter: str | None):
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
     tok = AutoTokenizer.from_pretrained(model_name)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
@@ -61,6 +86,8 @@ def load_policy(model_name: str, adapter: str | None):
 
 
 def generate_workflow(tok, model, prompt: str, max_new_tokens: int, temperature: float) -> str:
+    import torch
+
     inputs = tok(prompt, return_tensors="pt", truncation=True, max_length=2048)
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
     with torch.no_grad():
@@ -126,9 +153,7 @@ async def eval_one(tok, model, cfg, task, args) -> dict:
 
 async def main_async(args) -> int:
     cfg = load_config(args.config)
-    tasks = get_tasks(args.ids.split(",") if args.ids else None)
-    if args.limit:
-        tasks = tasks[:args.limit]
+    tasks = select_tasks(args.task_source, args.ids, args.limit)
     print(f"loading policy model={args.model} adapter={args.adapter or '<none>'}", flush=True)
     tok, model = load_policy(args.model, args.adapter)
     print(f"eval tasks={len(tasks)} pool={cfg.pool.ordinal_listing()!r}", flush=True)
@@ -166,6 +191,8 @@ def main() -> int:
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--out", default="eval_lora_policy.jsonl")
     ap.add_argument("--ids", default="", help="comma-separated task ids; default = all")
+    ap.add_argument("--task-source", choices=["seed", "curriculum", "heldout", "seed+heldout"],
+                    default="seed")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--max-new-tokens", type=int, default=300)
     ap.add_argument("--temperature", type=float, default=0.3)

@@ -39,6 +39,7 @@ os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
 import torch  # noqa: E402
 
 from .tasks import get_tasks, Task  # noqa: E402
+from .curriculum import get_curriculum_tasks  # noqa: E402
 from ..parser import parse_workflow, WorkflowParseError  # noqa: E402
 from ..prompts import build_conductor_prompt, DEFAULT_FEWSHOT  # noqa: E402
 
@@ -89,7 +90,11 @@ def format_reward(completions: List[str], **kwargs) -> List[float]:
 # Build a prompt->task map so the reward can recover the verifiable answer checker for
 # whatever task generated each completion. Workers run via the FRONTIER BRIDGE, so this
 # costs no GPU RAM (only the policy is on the iGPU); it IS slow (network per rollout).
-_PROMPT_TO_TASK = {make_prompt(t): t for t in get_tasks()}
+def _all_known_tasks() -> List[Task]:
+    return get_tasks() + get_curriculum_tasks("all")
+
+
+_PROMPT_TO_TASK = {make_prompt(t): t for t in _all_known_tasks()}
 _EXEC_POOL = None  # lazily built WorkerPool for execution reward
 REWARD_LOG_PATH = os.environ.get("AMALIA_REWARD_LOG")
 
@@ -193,10 +198,17 @@ def exec_reward(prompts: List[str], completions: List[str], **kwargs) -> List[fl
     return asyncio.run(run_all())
 
 
-def build_dataset(repeat: int = 8):
+def build_dataset(repeat: int = 8, task_source: str = "seed"):
     """Prompt-only dataset (GRPO needs just prompts; reward comes from the funcs)."""
     from datasets import Dataset
-    tasks = get_tasks()
+    if task_source == "seed":
+        tasks = get_tasks()
+    elif task_source == "curriculum":
+        tasks = get_curriculum_tasks("train")
+    elif task_source == "seed+curriculum":
+        tasks = get_tasks() + get_curriculum_tasks("train")
+    else:
+        raise ValueError(f"unknown task_source: {task_source!r}")
     prompts = [make_prompt(t) for t in tasks] * repeat
     return Dataset.from_dict({"prompt": prompts})
 
@@ -223,6 +235,9 @@ def main():
                          "so we keep activations and skip the backward recompute for ~30-40%% speedup)")
     ap.add_argument("--reward-log", default=os.environ.get("AMALIA_REWARD_LOG"),
                     help="optional JSONL path for exec-reward telemetry (workflows, answers, rewards)")
+    ap.add_argument("--task-source", choices=["seed", "curriculum", "seed+curriculum"],
+                    default="seed",
+                    help="which deterministic verifiable task set to train on")
     args = ap.parse_args()
     global REWARD_LOG_PATH
     REWARD_LOG_PATH = args.reward_log
@@ -282,7 +297,7 @@ def main():
     if args.exec_reward:
         reward_funcs.append(exec_reward)
 
-    ds = build_dataset(repeat=4 if args.smoke else 16)
+    ds = build_dataset(repeat=4 if args.smoke else 16, task_source=args.task_source)
     # config dump (pre-flight check #3: reproducibility metadata at step 0)
     import json as _json
     print("[grpo] CONFIG " + _json.dumps({
@@ -291,6 +306,7 @@ def main():
         "reward_funcs": [f.__name__ for f in reward_funcs], "save_steps": args.save_steps,
         "torch": torch.__version__, "dataset_prompts": len(ds),
         "reward_log": REWARD_LOG_PATH,
+        "task_source": args.task_source,
     }), flush=True)
 
     trainer = GRPOTrainer(
