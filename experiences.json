@@ -23,5 +23,20 @@
       "new_experiences": 2,
       "total_experiences": 5
     }
-  ]
+  ],
+  "_validation": {
+    "verdict": "NEGATIVE \u2014 experiences do not help; trend slightly hurts",
+    "method": "5-seed A/B, frontier pool, 39 tasks",
+    "no_exp_mean": 0.8667,
+    "with_exp_mean": 0.8256,
+    "delta": -0.041,
+    "welch_t": -1.17,
+    "cohens_d": -0.74,
+    "ci95": [
+      -0.139,
+      0.057
+    ],
+    "significant": false,
+    "note": "Kept as honest record. NOT loaded by the production server (server.py does not inject experiences). The +0.0513 from the training run was regression to the mean (its baseline seed was ~1.9 sigma low)."
+  }
 }

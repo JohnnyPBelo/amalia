@@ -29,16 +29,22 @@ and the Fugu technical report (arXiv:2606.21228) informed the design.
 ## Phase 2 — optional fine-tune (sharpen the orchestrator)
 Paper shows prompt+few-shot already induces orchestration; GRPO sharpens it.
 
-### 2a. Training-Free GRPO  ✅ MECHANISM WORKING (validation pending)
+### 2a. Training-Free GRPO  ❌ NEGATIVE RESULT (honest) — does not beat baseline on this task set
 Optimize in *context space*, no gradients, runs on the A9 with no H100s.
 - [x] Verifiable task set with reward = format + correctness (`amalia/training/tasks.py`, **39 tasks**, FINAL: answer convention, LaTeX/markdown-tolerant checkers, multi-step "trap" problems for routing signal). Every ground-truth independently verified in `tests/test_task_ground_truth.py`.
 - [x] Group-rollout loop: G workflows/task → score → contrast wins vs losses → orchestrator LLM distills ONE transferable "experience" (semantic group-advantage) → experience library injected into the Conductor prompt (`amalia/training/grpo_free.py`).
 - [x] Runner + eval harness (`amalia/training/run.py`): baseline → iterate → final pass-rate + delta; experiences persisted to `experiences.json`.
 - [x] **Experience-quality filter** (`is_useful_experience`) + structural near-dup dedup (`_norm_exp`/`dedup_experiences`): rejects platitudes, embedded `NONE`, and self-comparisons that the 7B distiller emits. Covered by `tests/test_experience_filter.py`.
-- [x] **Homogeneous-pool run (all-Qwen): delta = 0.0** — root-caused to (a) no real worker diversity, (b) distiller emitting vague platitudes. A/B multi-seed showed no clear effect within noise. *This is the negative result that motivated the fixes below.*
-- [x] **Frontier-pool run (gpt-5.5 + gemini-3.1-pro + claude-opus-4.8): baseline 0.7949 (31/39) → final 0.8462 (33/39), delta = +0.0513.** Reward rose across iters (0.795→0.821→0.801). Distilled 3 clean experiences (all about `access_list=[[], 'all']` topology). Orchestrator stays local Qwen2.5-7B; only the worker pool is frontier.
-- [ ] **Validate the +0.0513 is signal, not noise** (only +2 tasks; this set has shown 0.667↔0.917 variance). Need multi-seed A/B of the clean experience library vs empty, ideally with the full 39-task set.
-- [ ] Broaden distilled experiences beyond `access_list` (current library is single-concept; richer tasks may surface topology/step-count rules).
+- [x] **Homogeneous-pool run (all-Qwen): delta = 0.0** — root-caused to (a) no real worker diversity, (b) distiller emitting vague platitudes.
+- [x] **Frontier-pool run: baseline 0.7949 (31/39) → final 0.8462 (33/39), delta = +0.0513** — but this turned out to be **regression to the mean**, see below.
+- [x] **Multi-seed A/B validation (5 seeds × 2 conditions × 39 tasks, frontier pool) — the +0.0513 was NOISE:**
+  - NO-exp (empty library):  mean **0.8667** sd 0.0377  → the training run's "baseline 0.7949" was a ~1.9σ unlucky seed.
+  - WITH-exp (3 clean exps):  mean **0.8256** sd 0.0594
+  - delta = **−0.0410**, Welch t=−1.17 (df 6.8), Cohen's d=−0.74, 95% CI **[−0.139, +0.057] crosses 0**.
+  - Verdict: **not statistically significant; experiences do NOT help, and trend slightly hurts.**
+  - Per-task net (passes gained−lost across seeds): reasoning **−5**, math **−2**, code **−1** (total −8). The single-concept `access_list=[[], 'all']` rule *helped* a few pure-structure tasks (handshakes, pairs_5, speed +2 each) but *hurt* multi-step word problems (coins −3, age −2, trains_meet −2) — injecting a routing platitude distracts the orchestrator from decomposing.
+- **Root cause of the negative result:** (1) eval ceiling too high — frontier workers already solve ~87% single-shot, so there's little headroom for orchestration to win; (2) the 7B distiller only ever produces one concept (`access_list`), so the "learned prior" is narrow and off-target for reasoning tasks.
+- [ ] **If revisited:** need harder tasks where single-shot fails (true multi-hop/compositional), a stronger distiller (frontier model, not the 7B), and per-domain experiences. Otherwise skip to 2b.
 
 ### 2b. Real GRPO (optional, if 2a plateaus)
 - [ ] Real GRPO via TRL on Qwen2.5-7B. Paper: 2×H100, KL=0, 64 rollouts/q. On A9 use ROCm (torch 2.5.1+rocm6.2 confirmed) + LoRA to fit. See skill `fine-tuning-with-trl`.
