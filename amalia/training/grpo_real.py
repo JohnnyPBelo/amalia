@@ -101,8 +101,9 @@ def _get_exec_pool():
                    api_type="chat", capabilities="general", temperature=0.2, max_tokens=1024),
             Worker(name="m1", model="gemini-3.1-pro-preview", base_url="http://localhost:4141/v1",
                    api_type="chat", capabilities="math", temperature=0.1, max_tokens=1024),
-            Worker(name="m2", model="claude-opus-4.8", base_url="http://localhost:4141/v1",
-                   api_type="chat", capabilities="verify", temperature=0.1, max_tokens=1024),
+            Worker(name="m2", model="gpt-5.5", base_url="http://localhost:4142/v1",
+                   api_type="responses", capabilities="verify", temperature=0.1,
+                   max_tokens=2048, reasoning_effort="xhigh"),
         ])
     return _EXEC_POOL
 
@@ -167,6 +168,9 @@ def main():
                     help="checkpoint every N steps (cheap insurance for long iGPU runs)")
     ap.add_argument("--resume", action="store_true",
                     help="resume from the latest checkpoint in --out")
+    ap.add_argument("--grad-checkpointing", action="store_true",
+                    help="trade speed for memory (OFF by default — the A9 iGPU has 96GB VRAM, "
+                         "so we keep activations and skip the backward recompute for ~30-40%% speedup)")
     args = ap.parse_args()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -188,9 +192,8 @@ def main():
     model.config.use_cache = False
     # CRITICAL for peft + gradient checkpointing on ROCm: without this the checkpointed
     # forward produces activations with requires_grad=False and the backward pass dies
-    # with "element 0 of tensors does not require grad". This re-enables grad flow from
-    # the input embeddings so the LoRA adapters actually receive gradients.
-    if not args.no_lora:
+    # with "element 0 of tensors does not require grad". Only needed WITH grad checkpointing.
+    if not args.no_lora and args.grad_checkpointing:
         model.enable_input_require_grads()
 
     peft_config = None
@@ -212,7 +215,7 @@ def main():
         learning_rate=args.lr,
         logging_steps=1,
         max_steps=args.steps,
-        gradient_checkpointing=True,
+        gradient_checkpointing=args.grad_checkpointing,
         bf16=True,
         save_strategy="no" if args.smoke else "steps",
         save_steps=args.save_steps,
