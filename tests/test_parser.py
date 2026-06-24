@@ -22,9 +22,24 @@ def test_empty_workflow_is_recursion_return():
     assert w.is_empty()
 
 
-def test_prefers_last_python_block():
-    c = ('Here is an example:\n```python\nmodel_id = [9]\n```\n'
+def test_prefers_latest_valid_python_block():
+    c = ('Here is an invalid example:\n```python\nmodel_id = [9]\n```\n'
          'Now my answer:\n```python\nmodel_id = [1]\nsubtasks = ["go"]\naccess_list = [[]]\n```')
+    w = parse_workflow(c, n_models=3)
+    assert w.model_id == [1]
+
+
+def test_skips_trailing_empty_or_repeated_bad_code_blocks():
+    c = ('```python\nmodel_id = [1, 2]\nsubtasks = ["calc", "verify"]\naccess_list = [[], [0]]\n```'
+         'Human: FINAL: 54\n```python\n\n```')
+    w = parse_workflow(c, n_models=3)
+    assert w.model_id == [1, 2]
+    assert w.access_list == [[], [0]]
+
+
+def test_skips_later_invalid_block_when_earlier_block_is_valid():
+    c = ('```python\nmodel_id = [1]\nsubtasks = ["solve"]\naccess_list = [[]]\n```'
+         'Human: stray continuation\n```python\nmodel_id = [4]\nsubtasks = ["bad"]\naccess_list = [[]]\n```')
     w = parse_workflow(c, n_models=3)
     assert w.model_id == [1]
 

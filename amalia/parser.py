@@ -8,7 +8,9 @@ that: parsing either succeeds into a validated Workflow, or raises WorkflowParse
 
 Robustness notes:
   * The orchestrator emits a chain-of-thought THEN the lists, usually inside a ```python
-    block. We prefer the last ```python block; fall back to scanning raw text.
+    block. It may also continue with stray `Human:` turns or repeated/empty code blocks
+    after a valid workflow. We scan python blocks from latest to earliest and return
+    the first one that validates; fall back to scanning raw text.
   * We use ast.literal_eval (never exec/eval) so a malicious or malformed completion
     cannot run code.
   * access_list entries may be: []  |  ["all"]  |  [int, int, ...].
@@ -91,15 +93,7 @@ def _literal(snippet: str, name: str):
         raise WorkflowParseError(f"`{name}` is not a valid Python literal: {e}") from e
 
 
-def parse_workflow(completion: str, n_models: int, max_steps: int = 5) -> Workflow:
-    """Parse + validate a Conductor completion into a Workflow.
-
-    Raises WorkflowParseError on any structural problem (the paper's format-reward=0 case).
-    """
-    # Prefer the LAST python code block (the CoT may contain illustrative snippets first).
-    blocks = _PY_BLOCK.findall(completion)
-    search_space = blocks[-1] if blocks else completion
-
+def _parse_candidate(search_space: str, completion: str, n_models: int, max_steps: int) -> Workflow:
     model_id = _literal(search_space, "model_id")
     subtasks = _literal(search_space, "subtasks")
     access_list = _literal(search_space, "access_list")
@@ -148,3 +142,29 @@ def parse_workflow(completion: str, n_models: int, max_steps: int = 5) -> Workfl
 
     return Workflow(model_id=list(model_id), subtasks=list(subtasks),
                     access_list=norm_access, raw=completion)
+
+
+def parse_workflow(completion: str, n_models: int, max_steps: int = 5) -> Workflow:
+    """Parse + validate a Conductor completion into a Workflow.
+
+    Raises WorkflowParseError on any structural problem (the paper's format-reward=0 case).
+    """
+    # Prefer the latest VALID python code block. The model often emits a good workflow
+    # and then continues with stray `Human:` turns, repeated examples, or an empty
+    # ```python block. Trying only the last block turns those continuations into false
+    # parse failures; trying every block keeps the format reward aligned with intent.
+    blocks = _PY_BLOCK.findall(completion)
+    errors = []
+    for block in reversed(blocks):
+        try:
+            return _parse_candidate(block, completion, n_models, max_steps)
+        except WorkflowParseError as e:
+            errors.append(str(e))
+
+    # No valid fenced block — fall back to scanning raw text.
+    try:
+        return _parse_candidate(completion, completion, n_models, max_steps)
+    except WorkflowParseError as e:
+        if errors:
+            raise WorkflowParseError(f"no valid workflow block found; latest errors: {errors[:3]}") from e
+        raise
