@@ -27,8 +27,10 @@ Run:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
+import time
 from typing import List
 
 # gfx1151 (Radeon 8060S) needs the gfx1100 kernel override — set BEFORE importing torch.
@@ -89,6 +91,23 @@ def format_reward(completions: List[str], **kwargs) -> List[float]:
 # costs no GPU RAM (only the policy is on the iGPU); it IS slow (network per rollout).
 _PROMPT_TO_TASK = {make_prompt(t): t for t in get_tasks()}
 _EXEC_POOL = None  # lazily built WorkerPool for execution reward
+REWARD_LOG_PATH = os.environ.get("AMALIA_REWARD_LOG")
+
+
+def _append_reward_log(row: dict) -> None:
+    """Best-effort JSONL telemetry for understanding *why* GRPO learns.
+
+    Reward logging must never kill training: if disk/logging fails, skip it and let
+    the RL loop continue. This is for analysis, not correctness.
+    """
+    if not REWARD_LOG_PATH:
+        return
+    try:
+        os.makedirs(os.path.dirname(REWARD_LOG_PATH) or ".", exist_ok=True)
+        with open(REWARD_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def _get_exec_pool():
@@ -121,21 +140,52 @@ def exec_reward(prompts: List[str], completions: List[str], **kwargs) -> List[fl
     engine = WorkflowEngine(pool)
 
     async def run_one(prompt: str, completion: str) -> float:
+        t0 = time.time()
         text = completion if isinstance(completion, str) else completion[0]["content"]
         task = _PROMPT_TO_TASK.get(prompt)
         if task is None:
+            _append_reward_log({"ts": t0, "task_id": None, "reward": 0.0,
+                                "reason": "unknown_prompt"})
             return 0.0
         try:
             wf = parse_workflow(text, n_models=N_POOL, max_steps=MAX_STEPS)
         except WorkflowParseError:
+            _append_reward_log({"ts": t0, "task_id": task.id, "domain": task.domain,
+                                "reward": 0.0, "reason": "parse_error",
+                                "completion_preview": text[:500]})
             return 0.0
         if wf.is_empty():
+            _append_reward_log({"ts": t0, "task_id": task.id, "domain": task.domain,
+                                "reward": 0.0, "reason": "empty_workflow"})
             return 0.0
         try:
             result = await engine.execute(wf, task.question)
         except Exception:  # noqa: BLE001 — a bad workflow shouldn't kill the step
+            _append_reward_log({"ts": t0, "task_id": task.id, "domain": task.domain,
+                                "reward": -0.2, "reason": "execution_exception",
+                                "workflow": {"model_id": wf.model_id,
+                                             "subtasks": wf.subtasks,
+                                             "access_list": wf.access_list},
+                                "latency_s": round(time.time() - t0, 3)})
             return -0.2
-        return 1.0 if task.check(result.final_answer) else -0.1
+        ok = task.check(result.final_answer)
+        reward = 1.0 if ok else -0.1
+        _append_reward_log({
+            "ts": t0,
+            "task_id": task.id,
+            "domain": task.domain,
+            "reward": reward,
+            "ok": ok,
+            "final_answer": result.final_answer,
+            "n_worker_calls": result.n_worker_calls,
+            "workflow": {"model_id": wf.model_id,
+                         "subtasks": wf.subtasks,
+                         "access_list": wf.access_list},
+            "steps": [{"idx": s.idx, "model_id": s.model_id, "worker": s.worker_name,
+                       "ok": s.ok, "error": s.error} for s in result.steps],
+            "latency_s": round(time.time() - t0, 3),
+        })
+        return reward
 
     async def run_all():
         return await asyncio.gather(*[run_one(p, c) for p, c in zip(prompts, completions)])
@@ -171,7 +221,11 @@ def main():
     ap.add_argument("--grad-checkpointing", action="store_true",
                     help="trade speed for memory (OFF by default — the A9 iGPU has 96GB VRAM, "
                          "so we keep activations and skip the backward recompute for ~30-40%% speedup)")
+    ap.add_argument("--reward-log", default=os.environ.get("AMALIA_REWARD_LOG"),
+                    help="optional JSONL path for exec-reward telemetry (workflows, answers, rewards)")
     args = ap.parse_args()
+    global REWARD_LOG_PATH
+    REWARD_LOG_PATH = args.reward_log
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from trl import GRPOTrainer, GRPOConfig
@@ -236,6 +290,7 @@ def main():
         "lr": args.lr, "lora": not args.no_lora, "exec_reward": args.exec_reward,
         "reward_funcs": [f.__name__ for f in reward_funcs], "save_steps": args.save_steps,
         "torch": torch.__version__, "dataset_prompts": len(ds),
+        "reward_log": REWARD_LOG_PATH,
     }), flush=True)
 
     trainer = GRPOTrainer(

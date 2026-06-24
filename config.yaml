@@ -6,8 +6,9 @@
 # Worker pool = frontier models via the copilot bridge. Workers are presented to
 # the orchestrator ONLY as ordinals (Model 0/1/2) + a capability hint.
 #
-# gpt-5.5 is wired through the Responses-API shim on :4142 (api_type: responses) —
-# gpt-5.x models reject /chat/completions on the bridge.
+# IMPORTANT: keep these ordinals aligned with amalia.training.grpo_real.SMOKE_POOL_LISTING
+# and _get_exec_pool(), otherwise a trained policy learns one capability map and runtime
+# executes another.
 
 server:
   host: 0.0.0.0
@@ -22,31 +23,32 @@ orchestrator:
   max_tokens: 1024
 
 pool:
-  - name: gpt-5.5                       # Model 0 — frontier, Responses API (:4142)
-    model: gpt-5.5
-    base_url: http://localhost:4142/v1
-    api_key: none
-    api_type: responses
-    reasoning_effort: medium           # none/low/medium/high/xhigh
-    capabilities: "agentic coding, deep reasoning, general problem solving"
-    max_tokens: 4096
-
-  - name: gemini-3.1-pro                # Model 1 — math/science/factual, chat API
-    model: gemini-3.1-pro-preview
-    base_url: http://localhost:4141/v1
-    api_key: none
-    api_type: chat
-    capabilities: "math, science, factual recall, fast reasoning"
-    temperature: 0.2
-    max_tokens: 4096
-
-  - name: claude-opus-4.8             # Model 2 — verification/debugging/synthesis, chat API
+  - name: claude-opus-4.8                # Model 0 — general / coding / step-by-step
     model: claude-opus-4.8
     base_url: http://localhost:4141/v1
     api_key: none
     api_type: chat
-    capabilities: "deep reasoning, debugging, verification, long-form synthesis"
+    capabilities: "general problem solving, coding, step-by-step reasoning"
     temperature: 0.2
+    max_tokens: 4096
+
+  - name: gemini-3.1-pro                 # Model 1 — math / science / precise calculation
+    model: gemini-3.1-pro-preview
+    base_url: http://localhost:4141/v1
+    api_key: none
+    api_type: chat
+    capabilities: "arithmetic, math, number theory, precise calculation"
+    temperature: 0.1
+    max_tokens: 4096
+
+  - name: gpt-5.5-xhigh-verifier         # Model 2 — verification, via Responses API (:4142)
+    model: gpt-5.5
+    base_url: http://localhost:4142/v1
+    api_key: none
+    api_type: responses
+    reasoning_effort: xhigh
+    capabilities: "verification, checking answers, catching errors"
+    temperature: 0.1
     max_tokens: 4096
 
 conductor:
