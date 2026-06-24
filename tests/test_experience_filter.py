@@ -1,5 +1,39 @@
 """Tests for the experience-quality filter (the fix for vague distillations)."""
-from amalia.training.grpo_free import is_useful_experience, TrainState
+from amalia.training.grpo_free import (
+    is_useful_experience, dedup_experiences, _norm_exp, TrainState,
+)
+
+
+def test_rejects_embedded_none():
+    # observed leak from the frontier run: "(NONE)" embedded mid/end-of-line
+    assert is_useful_experience("access_list choice [ [], 'all' ] vs [ [], 'all' ] (NONE)") is False
+    assert is_useful_experience("Use a single step (NONE)") is False
+    assert is_useful_experience("no clear structural difference, none") is False
+
+
+def test_rejects_self_comparison():
+    # comparing a thing to itself carries no signal (observed real leak)
+    assert is_useful_experience("access_list choice [ [], 'all' ] vs [ [], 'all' ]") is False
+    assert is_useful_experience("used [0,1] vs used [0,1]") is False
+    # but a genuine A-vs-B contrast with a mechanism is still kept
+    assert is_useful_experience("Used 'all' in access_list vs used []") is True
+
+
+def test_dedup_near_duplicates():
+    # the two real ones from the frontier run that differ only by wording
+    exps = [
+        "Set access_list=[[], 'all'] instead of multiple empty lists.",
+        "set access_list to [[],'all']",
+        "Use a tree: two leaves then aggregator reading [0,1]",
+    ]
+    out = dedup_experiences(exps)
+    assert len(out) == 2, out
+    assert out[0].startswith("Set access_list")
+    assert "tree" in out[2 - 1]
+
+
+def test_norm_exp_collapses_wording():
+    assert _norm_exp("Set access_list=[[], 'all']") == _norm_exp("set access_list to [[],'all']")
 
 
 def test_rejects_none():

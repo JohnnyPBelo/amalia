@@ -99,6 +99,64 @@ SEED_TASKS: List[Task] = [
          "Are the brackets in the string '([{}])' balanced? Answer yes or no.", str_eq("yes"), "code"),
     Task("count_vowels",
          "How many vowels (a,e,i,o,u) are in the word 'orchestration'?", num_eq(5), "code"),
+
+    # ---- expanded set (Phase 2, step 3): more tasks to beat eval variance, with
+    # several multi-step "trap" problems that reward decomposition + verification
+    # (single-step intuition fails) so a frontier worker pool still produces signal. ----
+
+    # arithmetic — large/compound (single-shot error-prone -> verify step helps)
+    Task("mul_big", "What is 127 * 893?", num_eq(113411), "math"),
+    Task("compound", "Compute (45 + 67) * 12 - 89.", num_eq(1255), "math"),
+    Task("digit_sum", "What is the sum of the digits of 9876?", num_eq(30), "math"),
+    Task("seconds_2_5h", "How many seconds are there in 2.5 hours?", num_eq(9000), "math"),
+    Task("area_rect", "What is the area of a rectangle that is 12 by 7?", num_eq(84), "math"),
+    Task("avg_4", "What is the average of 10, 20, 30, and 40?", num_eq(25), "math"),
+    Task("pct_nested", "What is 30% of 30% of 1000?", num_eq(90), "math"),
+
+    # word problems — trap-prone, multi-step (decomposition + verification matter)
+    Task("age",
+         "Alice is 3 times as old as Bob. In 5 years, Alice will be twice as old as Bob. "
+         "How old is Bob now?", num_eq(5), "reasoning"),
+    Task("coins",
+         "You have 26 coins, all nickels and dimes, worth $2.05 in total. "
+         "How many dimes do you have?", num_eq(15), "reasoning"),
+    Task("discount",
+         "A shirt costs $80. It is discounted 25%, then a further 10% is taken off the "
+         "reduced price. What is the final price in dollars?", num_eq(54), "reasoning"),
+    Task("trains_meet",
+         "Two trains are 300 km apart and travel toward each other at 60 km/h and 90 km/h. "
+         "After how many hours do they meet?", num_eq(2), "reasoning"),
+    Task("work_days",
+         "If 4 workers build a wall in 6 days, how many days do 3 workers need to build "
+         "the same wall at the same rate?", num_eq(8), "reasoning"),
+
+    # number theory / sequences
+    Task("lcm", "What is the least common multiple of 12 and 18?", num_eq(36), "math"),
+    Task("factorial6", "What is 6! (six factorial)?", num_eq(720), "math"),
+    Task("sum_1_100", "What is the sum of all integers from 1 to 100 inclusive?", num_eq(5050), "math"),
+    Task("primes_below_20", "How many prime numbers are there below 20?", num_eq(8), "reasoning"),
+    Task("fib15", "What is the 15th Fibonacci number, counting 1, 1, 2, 3, 5, ...?", num_eq(610), "reasoning"),
+    Task("gcd_big", "What is the greatest common divisor of 252 and 105?", num_eq(21), "math"),
+
+    # combinatorics / logic
+    Task("handshakes",
+         "In a room of 10 people, everyone shakes hands exactly once with every other "
+         "person. How many handshakes happen in total?", num_eq(45), "reasoning"),
+    Task("choose_3_7", "How many ways are there to choose 3 items from 7 distinct items?", num_eq(35), "reasoning"),
+    Task("arrange_cat", "How many distinct ways can the letters in the word 'CAT' be arranged?", num_eq(6), "reasoning"),
+    Task("pairs_5", "In a group of 5 people, how many unique pairs can be formed?", num_eq(10), "reasoning"),
+
+    # string / code reasoning
+    Task("reverse_hello",
+         "Reverse the string 'hello'. Answer with only the reversed string.", str_eq("olleh"), "code"),
+    Task("anagram",
+         "Are 'listen' and 'silent' anagrams of each other? Answer yes or no.", str_eq("yes"), "code"),
+    Task("count_a_banana",
+         "How many times does the letter 'a' appear in the word 'banana'?", num_eq(3), "code"),
+    Task("substring_gram",
+         "Does the word 'programming' contain the substring 'gram'? Answer yes or no.", str_eq("yes"), "code"),
+    Task("distinct_mississippi",
+         "How many distinct characters are in the string 'mississippi'?", num_eq(4), "code"),
 ]
 
 

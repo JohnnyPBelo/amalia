@@ -56,12 +56,54 @@ def is_useful_experience(line: str) -> bool:
     structural mechanism (every workflow can claim both)."""
     if not line:
         return False
-    if line.upper().startswith("NONE"):
-        return False
     lower = line.lower()
+    # Reject the orchestrator's "no structural difference" signal, even when it's
+    # embedded mid/end-of-line (observed: "... vs [[], 'all'] (NONE)").
+    if "none" in lower and ("(none)" in lower or lower.startswith("none")
+                            or lower.strip().endswith("none")):
+        return False
+    # Reject self-comparisons "X vs X" — comparing a thing to itself carries no signal
+    # (observed: "access_list choice [[], 'all'] vs [[], 'all']").
+    if " vs " in lower:
+        a, b = lower.split(" vs ", 1)
+        if _norm_exp(a) and _norm_exp(a) == _norm_exp(b):
+            return False
     has_mechanism = any(k in lower for k in _MECHANISM_KEYS)
     vague_count = sum(lower.count(v) for v in _VAGUE_WORDS)
     return has_mechanism and vague_count < 2
+
+
+def _norm_exp(line: str) -> str:
+    """Normalize an experience to its STRUCTURAL SIGNATURE for near-duplicate and
+    self-comparison detection. We keep only the tokens that carry structural meaning —
+    bracket layout and digits — and drop all prose, quotes, verbs and filler. So:
+
+      "Set access_list=[[], 'all'] instead of multiple empty lists."  ->  "[[]all]"
+      "set access_list to [[],'all']"                                 ->  "[[]all]"
+      "access_list choice [ [], 'all' ]"                              ->  "[[]all]"
+
+    Two experiences whose structural core is identical collapse to the same key.
+    """
+    import re
+    s = line.lower()
+    # keep only brackets, digits, and the literal tokens 'all'/'none' that name a
+    # concrete access_list value; strip everything else (prose, quotes, spaces, commas).
+    s = s.replace("all", "\x00").replace("none", "\x01")   # protect value words
+    s = re.sub(r"[^\[\]\d\x00\x01]", "", s)                # keep only structure
+    s = s.replace("\x00", "all").replace("\x01", "none")
+    return s
+
+
+def dedup_experiences(experiences: List[str]) -> List[str]:
+    """Drop near-duplicate experiences (keep first occurrence), e.g.
+    'Set access_list=[[], all]' vs 'set access_list to [[],all]'."""
+    seen, out = set(), []
+    for e in experiences:
+        k = _norm_exp(e)
+        if k and k not in seen:
+            seen.add(k)
+            out.append(e)
+    return out
 
 
 @dataclass
@@ -181,7 +223,10 @@ class TrainingFreeGRPO:
                 n += 1
                 exp = await self._distill(task, list(rollouts), client)
                 if exp and exp not in self.state.experiences and exp not in new_exps:
-                    new_exps.append(exp)
+                    # near-duplicate guard: don't add a trivial rewording of one we have
+                    existing_keys = {_norm_exp(e) for e in self.state.experiences + new_exps}
+                    if _norm_exp(exp) not in existing_keys:
+                        new_exps.append(exp)
 
         self.state.experiences.extend(new_exps)
         metrics = {"mean_group_reward": round(total_reward / max(n, 1), 4),

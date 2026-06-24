@@ -29,14 +29,16 @@ and the Fugu technical report (arXiv:2606.21228) informed the design.
 ## Phase 2 — optional fine-tune (sharpen the orchestrator)
 Paper shows prompt+few-shot already induces orchestration; GRPO sharpens it.
 
-### 2a. Training-Free GRPO  🚧 IN PROGRESS
+### 2a. Training-Free GRPO  ✅ MECHANISM WORKING (validation pending)
 Optimize in *context space*, no gradients, runs on the A9 with no H100s.
-- [x] Verifiable task set with reward = format + correctness (`amalia/training/tasks.py`, 12 tasks, FINAL: answer convention, LaTeX/markdown-tolerant checkers).
+- [x] Verifiable task set with reward = format + correctness (`amalia/training/tasks.py`, **39 tasks**, FINAL: answer convention, LaTeX/markdown-tolerant checkers, multi-step "trap" problems for routing signal). Every ground-truth independently verified in `tests/test_task_ground_truth.py`.
 - [x] Group-rollout loop: G workflows/task → score → contrast wins vs losses → orchestrator LLM distills ONE transferable "experience" (semantic group-advantage) → experience library injected into the Conductor prompt (`amalia/training/grpo_free.py`).
 - [x] Runner + eval harness (`amalia/training/run.py`): baseline → iterate → final pass-rate + delta; experiences persisted to `experiences.json`.
-- [x] Baseline measured (local all-Qwen pool): **0.667 (8/12)**.
-- [ ] Run iterations, confirm pass-rate delta, tune experience count/wording.
-- [ ] Frontier-pool training run (slower/$$, richer signal).
+- [x] **Experience-quality filter** (`is_useful_experience`) + structural near-dup dedup (`_norm_exp`/`dedup_experiences`): rejects platitudes, embedded `NONE`, and self-comparisons that the 7B distiller emits. Covered by `tests/test_experience_filter.py`.
+- [x] **Homogeneous-pool run (all-Qwen): delta = 0.0** — root-caused to (a) no real worker diversity, (b) distiller emitting vague platitudes. A/B multi-seed showed no clear effect within noise. *This is the negative result that motivated the fixes below.*
+- [x] **Frontier-pool run (gpt-5.5 + gemini-3.1-pro + claude-opus-4.8): baseline 0.7949 (31/39) → final 0.8462 (33/39), delta = +0.0513.** Reward rose across iters (0.795→0.821→0.801). Distilled 3 clean experiences (all about `access_list=[[], 'all']` topology). Orchestrator stays local Qwen2.5-7B; only the worker pool is frontier.
+- [ ] **Validate the +0.0513 is signal, not noise** (only +2 tasks; this set has shown 0.667↔0.917 variance). Need multi-seed A/B of the clean experience library vs empty, ideally with the full 39-task set.
+- [ ] Broaden distilled experiences beyond `access_list` (current library is single-concept; richer tasks may surface topology/step-count rules).
 
 ### 2b. Real GRPO (optional, if 2a plateaus)
 - [ ] Real GRPO via TRL on Qwen2.5-7B. Paper: 2×H100, KL=0, 64 rollouts/q. On A9 use ROCm (torch 2.5.1+rocm6.2 confirmed) + LoRA to fit. See skill `fine-tuning-with-trl`.

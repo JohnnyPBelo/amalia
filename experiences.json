@@ -1,0 +1,27 @@
+{
+  "experiences": [
+    "Set access_list=[[], 'all'] instead of multiple empty lists.",
+    "used 'all' in access_list vs used []",
+    "access_list choice was 'all' for successes, 'all'/'[]' for failures."
+  ],
+  "history": [
+    {
+      "mean_group_reward": 0.7949,
+      "n_tasks": 39,
+      "new_experiences": 1,
+      "total_experiences": 1
+    },
+    {
+      "mean_group_reward": 0.8205,
+      "n_tasks": 39,
+      "new_experiences": 2,
+      "total_experiences": 3
+    },
+    {
+      "mean_group_reward": 0.8013,
+      "n_tasks": 39,
+      "new_experiences": 2,
+      "total_experiences": 5
+    }
+  ]
+}
