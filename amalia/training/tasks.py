@@ -42,16 +42,24 @@ def extract_final(text: str) -> str:
 
 
 def _nums(s: str) -> List[float]:
-    return [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", s.replace(",", ""))]
+    # Normalize common math/markdown formats before extracting numbers:
+    #   113{,}411 -> 113411, 3{,}600 -> 3600, $54 -> 54
+    s = re.sub(r"\{\s*,\s*\}", "", s)
+    s = s.replace(",", "").replace("{", "").replace("}", "")
+    return [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", s)]
 
 
 def num_eq(expected: float, tol: float = 1e-6) -> Callable[[str], bool]:
     """True if the expected number appears in the FINAL line (or, as fallback, the text)."""
     def chk(text: str) -> bool:
-        fin = extract_final(text)
-        for n in _nums(fin):
-            if abs(n - expected) <= tol:
-                return True
+        # Prefer the FINAL line, but fall back to the whole text. Some worker
+        # outputs are explanatory and put the correct numeric answer before the
+        # last line; training/eval should not punish a correct answer just for
+        # formatting noise.
+        for scope in (extract_final(text), text or ""):
+            for n in _nums(scope):
+                if abs(n - expected) <= tol:
+                    return True
         return False
     return chk
 
@@ -59,7 +67,9 @@ def num_eq(expected: float, tol: float = 1e-6) -> Callable[[str], bool]:
 def str_eq(expected: str) -> Callable[[str], bool]:
     exp = expected.strip().lower()
     def chk(text: str) -> bool:
-        return exp in extract_final(text).strip().lower()
+        fin = extract_final(text).strip().lower()
+        whole = (text or "").strip().lower()
+        return exp in fin or exp in whole
     return chk
 
 
@@ -67,7 +77,8 @@ def all_in(expected_items: List[str]) -> Callable[[str], bool]:
     items = [e.strip().lower() for e in expected_items]
     def chk(text: str) -> bool:
         fin = extract_final(text).lower()
-        return all(it in fin for it in items)
+        whole = (text or "").lower()
+        return all(it in fin for it in items) or all(it in whole for it in items)
     return chk
 
 

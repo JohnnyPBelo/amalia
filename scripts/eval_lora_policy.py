@@ -108,7 +108,7 @@ async def eval_one(tok, model, cfg, task, args) -> dict:
         return row
     engine = WorkflowEngine(cfg.pool)
     try:
-        result = await engine.execute(wf, task.question)
+        result = await engine.execute(wf, task.prompt())
     except Exception as e:  # noqa: BLE001
         row.update({"error": f"execution_error: {e!r}", "latency_s": round(time.time() - t0, 3)})
         return row

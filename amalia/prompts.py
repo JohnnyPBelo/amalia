@@ -49,6 +49,13 @@ without any access to previous routing steps, you can pass an empty list.
 First think step by step about how to best decompose and route the problem, then provide \
 your three Python lists inside a single ```python code block.
 
+CRITICAL FORMAT CONSTRAINTS:
+- Use ONLY the numbered models listed in AVAILABLE LANGUAGE MODELS below. \
+  Do NOT invent Model 3, Model 4, or any other unlisted model.
+- If the available list is Model 0..Model 2, every entry in model_id MUST be 0, 1, or 2.
+- After the ```python code block, STOP. Do not continue with another Human/User turn or extra examples.
+- The final routed worker should be instructed to end with `FINAL: <answer>` when the user asks for a computable answer.
+
 For instance:
 {few_shot_examples}
 

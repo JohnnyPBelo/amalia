@@ -159,7 +159,7 @@ def exec_reward(prompts: List[str], completions: List[str], **kwargs) -> List[fl
                                 "reward": 0.0, "reason": "empty_workflow"})
             return 0.0
         try:
-            result = await engine.execute(wf, task.question)
+            result = await engine.execute(wf, task.prompt())
         except Exception:  # noqa: BLE001 — a bad workflow shouldn't kill the step
             _append_reward_log({"ts": t0, "task_id": task.id, "domain": task.domain,
                                 "reward": -0.2, "reason": "execution_exception",
