@@ -36,8 +36,6 @@ from typing import List
 # gfx1151 (Radeon 8060S) needs the gfx1100 kernel override — set BEFORE importing torch.
 os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "11.0.0")
 
-import torch  # noqa: E402
-
 from .tasks import get_tasks, Task  # noqa: E402
 from .curriculum import get_curriculum_tasks  # noqa: E402
 from ..parser import parse_workflow, WorkflowParseError  # noqa: E402
@@ -97,6 +95,7 @@ def _all_known_tasks() -> List[Task]:
 _PROMPT_TO_TASK = {make_prompt(t): t for t in _all_known_tasks()}
 _EXEC_POOL = None  # lazily built WorkerPool for execution reward
 REWARD_LOG_PATH = os.environ.get("AMALIA_REWARD_LOG")
+EXEC_REWARD_PROFILE = os.environ.get("AMALIA_REWARD_PROFILE", "binary")
 
 
 def _append_reward_log(row: dict) -> None:
@@ -130,6 +129,29 @@ def _get_exec_pool():
                    max_tokens=2048, reasoning_effort="xhigh"),
         ])
     return _EXEC_POOL
+
+
+def score_exec_result(ok: bool, n_worker_calls: int, model_ids: List[int], profile: str = "binary") -> float:
+    """Pure scoring function for executed workflows.
+
+    The execution reward is deliberately split into (a) running the workflow and
+    (b) scoring the result so reward profiles can be tested without a live WorkerPool.
+    """
+    if profile == "binary":
+        return 1.0 if ok else -0.1
+    if profile == "beyond_fugu_v1":
+        # Shaped but still verifiable: correctness dominates; then prefer minimal
+        # successful topologies and real verifier usage. This avoids teaching the
+        # policy to call every worker every time just to harvest binary success.
+        used_verifier = 2 in model_ids
+        reward = 1.0 if ok else -0.25
+        if ok and used_verifier:
+            reward += 0.10
+        if ok and n_worker_calls <= 2:
+            reward += 0.05
+        reward -= max(0, n_worker_calls - 2) * 0.04
+        return reward
+    raise ValueError(f"unknown reward profile: {profile!r}")
 
 
 def exec_reward(prompts: List[str], completions: List[str], **kwargs) -> List[float]:
@@ -174,12 +196,18 @@ def exec_reward(prompts: List[str], completions: List[str], **kwargs) -> List[fl
                                 "latency_s": round(time.time() - t0, 3)})
             return -0.2
         ok = task.check(result.final_answer)
-        reward = 1.0 if ok else -0.1
+        reward = score_exec_result(
+            ok=ok,
+            n_worker_calls=result.n_worker_calls,
+            model_ids=wf.model_id,
+            profile=EXEC_REWARD_PROFILE,
+        )
         _append_reward_log({
             "ts": t0,
             "task_id": task.id,
             "domain": task.domain,
             "reward": reward,
+            "reward_profile": EXEC_REWARD_PROFILE,
             "ok": ok,
             "final_answer": result.final_answer,
             "n_worker_calls": result.n_worker_calls,
@@ -238,10 +266,16 @@ def main():
     ap.add_argument("--task-source", choices=["seed", "curriculum", "seed+curriculum"],
                     default="seed",
                     help="which deterministic verifiable task set to train on")
+    ap.add_argument("--reward-profile", choices=["binary", "beyond_fugu_v1"],
+                    default=os.environ.get("AMALIA_REWARD_PROFILE", "binary"),
+                    help="execution reward shaping profile")
     args = ap.parse_args()
     global REWARD_LOG_PATH
     REWARD_LOG_PATH = args.reward_log
+    global EXEC_REWARD_PROFILE
+    EXEC_REWARD_PROFILE = args.reward_profile
 
+    import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from trl import GRPOTrainer, GRPOConfig
 
@@ -307,6 +341,7 @@ def main():
         "torch": torch.__version__, "dataset_prompts": len(ds),
         "reward_log": REWARD_LOG_PATH,
         "task_source": args.task_source,
+        "reward_profile": EXEC_REWARD_PROFILE,
     }), flush=True)
 
     trainer = GRPOTrainer(
