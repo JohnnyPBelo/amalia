@@ -267,6 +267,8 @@ def main():
     ap.add_argument("--out", default="grpo_out")
     ap.add_argument("--smoke", action="store_true", help="tiny run to validate the loop")
     ap.add_argument("--no-lora", action="store_true")
+    ap.add_argument("--init-adapter", default=None,
+                    help="optional LoRA adapter directory to continue training from")
     ap.add_argument("--exec-reward", action="store_true",
                     help="add the execution reward (runs workflows on the frontier bridge; "
                          "this is the real orchestration signal but needs :4141 up and is slow)")
@@ -325,7 +327,13 @@ def main():
         model.enable_input_require_grads()
 
     peft_config = None
-    if not args.no_lora:
+    if args.init_adapter:
+        if args.no_lora:
+            raise ValueError("--init-adapter cannot be combined with --no-lora")
+        from peft import PeftModel
+        print(f"[grpo] loading initial LoRA adapter: {args.init_adapter}", flush=True)
+        model = PeftModel.from_pretrained(model, args.init_adapter, is_trainable=True)
+    elif not args.no_lora:
         from peft import LoraConfig
         peft_config = LoraConfig(
             r=16, lora_alpha=32, lora_dropout=0.05, bias="none",
@@ -361,7 +369,8 @@ def main():
     import json as _json
     print("[grpo] CONFIG " + _json.dumps({
         "model": args.model, "steps": args.steps, "num_generations": args.num_generations,
-        "lr": args.lr, "lora": not args.no_lora, "exec_reward": args.exec_reward,
+        "lr": args.lr, "lora": not args.no_lora, "init_adapter": args.init_adapter,
+        "exec_reward": args.exec_reward,
         "reward_funcs": [f.__name__ for f in reward_funcs], "save_steps": args.save_steps,
         "torch": torch.__version__, "dataset_prompts": len(ds),
         "reward_log": REWARD_LOG_PATH,
