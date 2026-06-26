@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import time
@@ -63,24 +64,38 @@ def make_prompt(task: Task) -> str:
     )
 
 
+def score_format_result(text: str, profile: str = "legacy") -> float:
+    """Score workflow syntax without executing it.
+
+    `legacy` preserves Run 1 behavior. `strict_v2` is safer for GRPO because the
+    Run 1 failure mode was max-length junk with partial list fragments still
+    receiving enough soft signal to keep sampling unstable continuations.
+    """
+    try:
+        wf = parse_workflow(text, n_models=N_POOL, max_steps=MAX_STEPS)
+        return 1.0 if not wf.is_empty() else 0.5
+    except WorkflowParseError:
+        if profile == "legacy":
+            n_lists = len(re.findall(r"\[.*?\]", text, re.DOTALL))
+            return 0.5 if n_lists >= 3 else 0.0
+        if profile == "strict_v2":
+            has_names = all(name in text for name in ("model_id", "subtasks", "access_list"))
+            n_lists = len(re.findall(r"\[.*?\]", text, re.DOTALL))
+            # tiny breadcrumb only when it looks like the right contract, not when it
+            # rambles into unrelated Model metadata or unclosed max-length continuations.
+            return 0.15 if has_names and n_lists >= 3 else -0.2
+        raise ValueError(f"unknown format reward profile: {profile!r}")
+
+
 def format_reward(completions: List[str], **kwargs) -> List[float]:
     """Reward = does the completion parse into a valid workflow?
 
-    Graded, not binary, so the policy gets a gradient toward well-formedness:
-      1.0  parses cleanly into a valid, non-empty workflow
-      0.5  contains all three bracketed lists but fails strict validation
-      0.0  no parseable 3-list structure at all
+    Graded, not binary, so the policy gets a gradient toward well-formedness.
     """
     rewards = []
     for c in completions:
         text = c if isinstance(c, str) else c[0]["content"]
-        try:
-            wf = parse_workflow(text, n_models=N_POOL, max_steps=MAX_STEPS)
-            rewards.append(1.0 if not wf.is_empty() else 0.5)
-        except WorkflowParseError:
-            # partial credit if it at least emitted three bracketed lists
-            n_lists = len(re.findall(r"\[.*?\]", text, re.DOTALL))
-            rewards.append(0.5 if n_lists >= 3 else 0.0)
+        rewards.append(score_format_result(text, profile=FORMAT_REWARD_PROFILE))
     return rewards
 
 
@@ -96,6 +111,7 @@ _PROMPT_TO_TASK = {make_prompt(t): t for t in _all_known_tasks()}
 _EXEC_POOL = None  # lazily built WorkerPool for execution reward
 REWARD_LOG_PATH = os.environ.get("AMALIA_REWARD_LOG")
 EXEC_REWARD_PROFILE = os.environ.get("AMALIA_REWARD_PROFILE", "binary")
+FORMAT_REWARD_PROFILE = os.environ.get("AMALIA_FORMAT_REWARD_PROFILE", "legacy")
 
 
 def _append_reward_log(row: dict) -> None:
@@ -269,14 +285,23 @@ def main():
     ap.add_argument("--reward-profile", choices=["binary", "beyond_fugu_v1"],
                     default=os.environ.get("AMALIA_REWARD_PROFILE", "binary"),
                     help="execution reward shaping profile")
+    ap.add_argument("--format-reward-profile", choices=["legacy", "strict_v2"],
+                    default=os.environ.get("AMALIA_FORMAT_REWARD_PROFILE", "legacy"),
+                    help="syntax reward shaping profile; strict_v2 penalizes unparseable max-length junk")
+    ap.add_argument("--early-stop-zero-reward-steps", type=int, default=0,
+                    help="stop after N consecutive logged steps with reward <= 0 or non-finite; 0 disables")
+    ap.add_argument("--stop-on-nonfinite", action="store_true",
+                    help="stop training as soon as logged grad_norm/loss/kl is NaN or Inf")
     args = ap.parse_args()
     global REWARD_LOG_PATH
     REWARD_LOG_PATH = args.reward_log
     global EXEC_REWARD_PROFILE
     EXEC_REWARD_PROFILE = args.reward_profile
+    global FORMAT_REWARD_PROFILE
+    FORMAT_REWARD_PROFILE = args.format_reward_profile
 
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
     from trl import GRPOTrainer, GRPOConfig
 
     print(f"[grpo] torch={torch.__version__} cuda={torch.cuda.is_available()} "
@@ -342,7 +367,53 @@ def main():
         "reward_log": REWARD_LOG_PATH,
         "task_source": args.task_source,
         "reward_profile": EXEC_REWARD_PROFILE,
+        "format_reward_profile": FORMAT_REWARD_PROFILE,
+        "early_stop_zero_reward_steps": args.early_stop_zero_reward_steps,
+        "stop_on_nonfinite": args.stop_on_nonfinite,
     }), flush=True)
+
+    class StabilityGuardCallback(TrainerCallback):
+        """Stop long runs before they overwrite a good checkpoint with collapse.
+
+        Run 1 failed by entering a stable zero-reward/max-length regime with NaN
+        grad_norm/KL after the useful checkpoint window. This callback turns that
+        failure mode into an early stop while preserving the last checkpoint.
+        """
+
+        def __init__(self, zero_reward_patience: int = 0, stop_on_nonfinite: bool = False):
+            self.zero_reward_patience = zero_reward_patience
+            self.stop_on_nonfinite = stop_on_nonfinite
+            self.zero_reward_streak = 0
+
+        @staticmethod
+        def _nonfinite(value) -> bool:
+            return isinstance(value, (int, float)) and not math.isfinite(float(value))
+
+        def on_log(self, args_, state, control, logs=None, **kwargs):  # noqa: ANN001
+            logs = logs or {}
+            for key in ("loss", "grad_norm", "kl"):
+                if self.stop_on_nonfinite and self._nonfinite(logs.get(key)):
+                    print(f"[grpo] EARLY_STOP nonfinite {key}={logs.get(key)} step={state.global_step}", flush=True)
+                    control.should_training_stop = True
+                    return control
+            reward = logs.get("reward")
+            if self.zero_reward_patience and isinstance(reward, (int, float)):
+                if (not math.isfinite(float(reward))) or float(reward) <= 0.0:
+                    self.zero_reward_streak += 1
+                else:
+                    self.zero_reward_streak = 0
+                if self.zero_reward_streak >= self.zero_reward_patience:
+                    print("[grpo] EARLY_STOP zero_reward_streak="
+                          f"{self.zero_reward_streak} step={state.global_step}", flush=True)
+                    control.should_training_stop = True
+            return control
+
+    callbacks = []
+    if args.early_stop_zero_reward_steps or args.stop_on_nonfinite:
+        callbacks.append(StabilityGuardCallback(
+            zero_reward_patience=args.early_stop_zero_reward_steps,
+            stop_on_nonfinite=args.stop_on_nonfinite,
+        ))
 
     trainer = GRPOTrainer(
         model=model,
@@ -351,6 +422,7 @@ def main():
         train_dataset=ds,
         processing_class=tok,
         peft_config=peft_config,
+        callbacks=callbacks,
     )
     print("[grpo] starting training ...", flush=True)
     trainer.train(resume_from_checkpoint=args.resume or None)
