@@ -30,6 +30,12 @@ def main() -> int:
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--max-seq-length", type=int, default=2048)
     ap.add_argument("--save-steps", type=int, default=25)
+    ap.add_argument("--torch-dtype", choices=["bf16", "fp32"], default="bf16",
+                    help="bf16 is faster; fp32 is safer if ROCm/PEFT adapters go non-finite")
+    ap.add_argument("--max-grad-norm", type=float, default=0.3)
+    ap.add_argument("--warmup-ratio", type=float, default=0.03)
+    ap.add_argument("--stop-on-nonfinite", action="store_true",
+                    help="abort immediately if logged loss/grad_norm becomes NaN/Inf")
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
@@ -37,7 +43,7 @@ def main() -> int:
     import torch
     from datasets import Dataset
     from peft import LoraConfig
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
     from trl import SFTConfig, SFTTrainer
 
     records = build_sft_records(args.task_source)
@@ -52,9 +58,10 @@ def main() -> int:
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
+    dtype = torch.bfloat16 if args.torch_dtype == "bf16" else torch.float32
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=dtype,
         device_map={"": 0} if torch.cuda.is_available() else None,
     )
     model.config.use_cache = False
@@ -82,7 +89,10 @@ def main() -> int:
         save_strategy="no" if args.smoke else "steps",
         save_steps=args.save_steps,
         report_to=[],
-        bf16=True,
+        bf16=args.torch_dtype == "bf16",
+        fp16=False,
+        max_grad_norm=args.max_grad_norm,
+        warmup_ratio=args.warmup_ratio,
         seed=args.seed,
     )
 
@@ -97,11 +107,29 @@ def main() -> int:
         "grad_accum": args.grad_accum,
         "lr": args.lr,
         "max_seq_length": args.max_seq_length,
+        "torch_dtype": args.torch_dtype,
+        "max_grad_norm": args.max_grad_norm,
+        "warmup_ratio": args.warmup_ratio,
+        "stop_on_nonfinite": args.stop_on_nonfinite,
         "torch": torch.__version__,
         "cuda": torch.cuda.is_available(),
         "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
         "seed": args.seed,
     }), flush=True)
+
+    class NonFiniteGuardCallback(TrainerCallback):
+        def on_log(self, args_, state, control, logs=None, **kwargs):  # noqa: ANN001
+            if not args.stop_on_nonfinite:
+                return control
+            import math
+            logs = logs or {}
+            for key in ("loss", "grad_norm"):
+                value = logs.get(key)
+                if isinstance(value, (int, float)) and not math.isfinite(float(value)):
+                    print(f"[sft] EARLY_STOP nonfinite {key}={value} step={state.global_step}", flush=True)
+                    control.should_training_stop = True
+                    return control
+            return control
 
     trainer = SFTTrainer(
         model=model,
@@ -109,6 +137,7 @@ def main() -> int:
         train_dataset=ds,
         processing_class=tok,
         peft_config=peft_config,
+        callbacks=[NonFiniteGuardCallback()] if args.stop_on_nonfinite else None,
     )
     print("[sft] starting training ...", flush=True)
     trainer.train()
