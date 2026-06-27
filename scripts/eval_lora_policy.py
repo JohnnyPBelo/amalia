@@ -24,6 +24,7 @@ import argparse
 import asyncio
 import json
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -64,6 +65,23 @@ def select_tasks(task_source: str = "seed", ids_arg: str = "", limit: int = 0):
     if limit:
         tasks = tasks[:limit]
     return tasks
+
+
+def set_eval_seed(seed: int) -> None:
+    """Seed Python/NumPy/Torch generation for reproducible stochastic evals."""
+    random.seed(seed)
+    try:
+        import numpy as np
+        np.random.seed(seed)
+    except Exception:  # noqa: BLE001 - numpy may be absent in minimal envs
+        pass
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except Exception:  # noqa: BLE001 - torch is lazily required by eval only
+        pass
 
 
 def load_policy(model_name: str, adapter: str | None):
@@ -154,6 +172,9 @@ async def eval_one(tok, model, cfg, task, args) -> dict:
 async def main_async(args) -> int:
     cfg = load_config(args.config)
     tasks = select_tasks(args.task_source, args.ids, args.limit)
+    if args.seed is not None:
+        set_eval_seed(args.seed)
+        print(f"eval seed={args.seed}", flush=True)
     print(f"loading policy model={args.model} adapter={args.adapter or '<none>'}", flush=True)
     tok, model = load_policy(args.model, args.adapter)
     print(f"eval tasks={len(tasks)} pool={cfg.pool.ordinal_listing()!r}", flush=True)
@@ -179,6 +200,7 @@ async def main_async(args) -> int:
         "passed": passed,
         "pass_rate": round(passed / len(tasks), 4) if tasks else 0.0,
         "out": str(out_path),
+        "seed": args.seed,
     }
     print(json.dumps(summary, indent=2), flush=True)
     return 0
@@ -196,6 +218,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--max-new-tokens", type=int, default=300)
     ap.add_argument("--temperature", type=float, default=0.3)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="optional RNG seed for reproducible stochastic generation")
     args = ap.parse_args()
     return asyncio.run(main_async(args))
 
